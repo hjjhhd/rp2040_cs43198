@@ -2,7 +2,7 @@ import time
 from machine import Pin
 
 
-FN_PINS = [1, 2, 3, 8]
+FN_PINS = (1, 2, 3, 8)
 
 
 class Combo384():
