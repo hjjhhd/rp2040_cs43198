@@ -1,3 +1,3 @@
 import time
-from machine import Pin
+from machine import UART, Pin
 
