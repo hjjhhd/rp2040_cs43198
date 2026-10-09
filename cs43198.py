@@ -5,17 +5,15 @@ from machine import I2C, Pin
 
 import cs43198_reg as reg
 
-
 # ======================== 引脚占位定义 ========================
 # 注意：以下引脚均按要求先设为 GP1。实际使用前务必修改，避免 SCL、SDA、RESET
 # 相互冲突或不属于对应 I2C 外设。I2C0 常见配对为 SDA=GP0/SCL=GP1 或
 # SDA=GP4/SCL=GP5；I2C1 常见配对为 SDA=GP2/SCL=GP3、GP6/GP7 等。
-I2C0_SCL_PIN = 1  # 提醒：占位 GP1，须按接线修改
-I2C0_SDA_PIN = 1  # 提醒：占位 GP1，须按接线修改，不能与 SCL 同脚
-I2C1_SCL_PIN = 1  # 提醒：占位 GP1，须按接线修改为 I2C1 可用引脚
-I2C1_SDA_PIN = 1  # 提醒：占位 GP1，须按接线修改，不能与 SCL 同脚
 RESET_PIN = 1     # 提醒：占位 GP1；两颗 DAC 共用此复位脚，拉低会同时复位
-
+I2C0_SCL_PIN = 5
+I2C0_SDA_PIN = 4
+I2C1_SCL_PIN = 7
+I2C1_SDA_PIN = 6
 
 class _CS43198Base:
     """封装 CS43198 的 24 位寄存器 I2C 访问和通用播放控制。"""
