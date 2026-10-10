@@ -3,10 +3,16 @@ import cs43198_reg
 import cs43198
 
 
-
 Ctrl = combo384.Combo384()
 Left = cs43198.CS43198_L()
 Right = cs43198.CS43198_R()
+Pins = (1, 2, 3, 8)
+global Pending
+Pending = False
+
+
+def interrupt():
+    Pending = True
 
 def pcm_setrate():
     Left.mute_pcm()
