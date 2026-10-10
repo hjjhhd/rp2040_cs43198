@@ -13,9 +13,9 @@ class Combo384():
     def Fn(self):
         fn = 0
         if len(self.fn_pin) == 4:
-            fn = min(7,self.fn_pin[0] + self.fn_pin[1] * 2 + self.fn_pin[2] * 4 + self.fn_pin[3] * 8 - 1)
+            fn = min(8,self.fn_pin[0].value() + self.fn_pin[1].value() * 2 + self.fn_pin[2].value() * 4 + self.fn_pin[3].value() * 8)
         return fn
 
     def Mclk_Hz(self):
-        return 24_576_000 if self.fn_pin[0] else 22_579_200
+        return 24_576_000 if not self.fn_pin[0].value() else 22_579_200
 

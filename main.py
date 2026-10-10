@@ -13,6 +13,10 @@ def pcm_setrate():
     Right.mute_pcm()
     Left.set_sample_rate(Ctrl.rate[Ctrl.Fn()])
     Right.set_sample_rate(Ctrl.rate[Ctrl.Fn()])
+    Left.set_mclk_source("direct", Ctrl.Mclk_Hz())
+    Right.set_mclk_source("direct", Ctrl.Mclk_Hz())
+    Left.mute_pcm(False)
+    Right.mute_pcm(False)
 
 
 if __name__ == "__main__":
