@@ -9,7 +9,7 @@ import cs43198_reg as reg
 # 注意：以下引脚均按要求先设为 GP1。实际使用前务必修改，避免 SCL、SDA、RESET
 # 相互冲突或不属于对应 I2C 外设。I2C0 常见配对为 SDA=GP0/SCL=GP1 或
 # SDA=GP4/SCL=GP5；I2C1 常见配对为 SDA=GP2/SCL=GP3、GP6/GP7 等。
-RESET_PIN = 1     # 提醒：占位 GP1；两颗 DAC 共用此复位脚，拉低会同时复位
+RESET_PIN = 26 
 I2C0_SCL_PIN = 5
 I2C0_SDA_PIN = 4
 I2C1_SCL_PIN = 7
@@ -93,7 +93,7 @@ class _CS43198Base:
         )) + data
         self.i2c.writeto(self.address, payload)
 
-    def reset(self, low_ms=2, settle_ms=2):
+    def reset(self, low_ms=3, settle_ms=3):
         """通过共用 RESET GPIO 产生硬件复位脉冲；会同时复位左右两颗 CS43198。
 
         复位释放后至少等待芯片完成上电和 ADR 地址锁存，再调用其他寄存器方法；
