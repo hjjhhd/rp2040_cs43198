@@ -97,13 +97,13 @@ class _CS43198Base:
         """通过共用 RESET GPIO 产生硬件复位脉冲；会同时复位左右两颗 CS43198。
 
         复位释放后至少等待芯片完成上电和 ADR 地址锁存，再调用其他寄存器方法；
-        默认等待时间按规格书的 1.5 ms 上电示例留有余量。
+        默认等待时间按规格书的 1.5 ms 上电示例留有余量。1拉低reset,0拉高reset
         """
         if self.reset_pin is None:
             raise RuntimeError("创建对象时未配置 reset_pin")
-        self.reset_pin.value(0)
-        time.sleep_ms(low_ms)
         self.reset_pin.value(1)
+        time.sleep_ms(low_ms)
+        self.reset_pin.value(0)
         time.sleep_ms(settle_ms)
 
     def read_device_id(self):

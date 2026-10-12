@@ -29,7 +29,7 @@ def pcm_setrate():
     Right.mute_pcm(False)
 
 def initialization():
-    pass
+    Left.reset()
 
 def detect():
     pass
