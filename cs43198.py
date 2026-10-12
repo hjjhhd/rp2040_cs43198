@@ -245,6 +245,31 @@ class _CS43198Base:
         """
         self.write_reg(reg.REG_POWER_DOWN, value)
 
+    def set_dsd_mute(self, mute=True):
+        """设置 DSD A/B 通道手动静音；保留其余 DSD 路径控制位不变。"""
+        value = self.read_reg(reg.REG_DSD_PATH_CONTROL_1)
+        value = (value | 0x03) if mute else (value & 0xFC)
+        self.write_reg(reg.REG_DSD_PATH_CONTROL_1, value)
+
+    def set_dsd_enabled(self, enabled=True):
+        """按规格书顺序使能或关闭 DSD 处理器；只修改 DSD_EN 位。"""
+        value = self.read_reg(reg.REG_DSD_PATH_CONTROL_2)
+        value = (value | 0x10) if enabled else (value & 0xEF)
+        self.write_reg(reg.REG_DSD_PATH_CONTROL_2, value)
+
+    def configure_class_h(self, value=0x1E):
+        """配置 Class H 输出；默认使用内部 VCPFILT 和规格书示例的自适应高压模式。"""
+        self.write_reg(reg.REG_CLASS_H_CONTROL, value)
+
+    def configure_analog_output(self, value=0x30):
+        """配置 DAC 模拟输出满量程；默认使用规格书示例的 1.732 Vrms 设置。"""
+        self.write_reg(reg.REG_ANALOG_OUTPUT_CONTROL, value)
+
+    def configure_popguard(self, enabled=True):
+        """配置规格书示例的 Popguard 辅助寄存器，降低 DAC 上电和下电瞬态。"""
+        self.write_reg(reg.REG_POPGUARD_CONTROL, 0x99 if enabled else 0x00)
+        self.write_reg(reg.REG_POPGUARD_TIMING, 0x20 if enabled else 0x00)
+
 
 class CS43198_L(_CS43198Base):
     """左声道 CS43198：默认使用 I2C0，I2S/DSD 单声道输入选左时隙。"""

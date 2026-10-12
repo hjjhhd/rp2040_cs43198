@@ -63,6 +63,9 @@ REG_INTERRUPT_STATUS_5 = 0x0F0004  # 中断状态 5（读清除）
 REG_INTERRUPT_MASK_1 = 0x0F0010    # 中断屏蔽 1
 REG_INTERRUPT_MASK_2 = 0x0F0011    # 中断屏蔽 2
 REG_INTERRUPT_MASK_5 = 0x0F0014    # 中断屏蔽 5
+# 规格书示例中的 Popguard 和模拟输出辅助寄存器地址。
+REG_POPGUARD_CONTROL = 0x010010   # Popguard 电源上电/下电控制
+REG_POPGUARD_TIMING = 0x080032    # Popguard 输出斜坡时序控制
 
 # I2C 控制字节：SIZE=00 表示 8 位访问；INCR=1 用于连续寄存器读写。
 I2C_CONTROL_BYTE = 0x00
