@@ -6,10 +6,12 @@ from machine import I2C, Pin
 
 
 
-MUTE_PIN = 22
+MUTE_PIN = 20
 RLED_PIN = 15
 GLED_PIN = 14
 DSDON_PIN = 9
+DSD_PIN = 21
+PLUG_PIN = 22
 PCMCH_PIN = 27
 BALCH_PIN = 28
 
@@ -18,13 +20,14 @@ gled_pin = Pin(GLED_PIN, Pin.OUT, value=0)
 pcm_pin = Pin(PCMCH_PIN, Pin.IN)
 bal_pin = Pin(BALCH_PIN, Pin.IN)
 dsdon_pin = Pin(DSDON_PIN, Pin.IN)
+dsd_pin = Pin(DSD_PIN, Pin.IN)
 
 Ctrl = combo384.Combo384()
 Left = cs43198.CS43198_L()
 Right = cs43198.CS43198_R()
-Pins = (combo384.FN_PINS[0], combo384.FN_PINS[1], combo384.FN_PINS[2], combo384.FN_PINS[3],
+Pin_numbers = (combo384.FN_PINS[0], combo384.FN_PINS[1], combo384.FN_PINS[2], combo384.FN_PINS[3],
         MUTE_PIN, RLED_PIN, GLED_PIN, cs43198.RESET_PIN, cs43198.I2C0_SCL_PIN, cs43198.I2C0_SDA_PIN,
-        cs43198.I2C1_SCL_PIN, cs43198.I2C1_SDA_PIN     
+        cs43198.I2C1_SCL_PIN, cs43198.I2C1_SDA_PIN, DSDON_PIN, DSD_PIN, PLUG_PIN, PCMCH_PIN, BALCH_PIN
         )
 global Pending
 Pending = False
@@ -33,7 +36,6 @@ Pending = False
 
 def interrupt():
     Pending = True
-
 
 def pcm_setrate():
     Left.mute_pcm()
@@ -86,7 +88,7 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
     elif is_dsd:
         for dac in dacs:
             # 新增读取Combo384第16脚DSD64_128状态：低为DSD64，高为DSD128。
-            dsd_rate = 128 if bal_pin.value() else 64
+            dsd_rate = 128 if dsd_pin.value() else 64
             dac.configure_dsd_mono(dsd_rate)  # 修改为按板卡倍速状态配置，只使用CS43198支持的64/128。
             # 新增清除提前设置的 DSD_EN，确保后续先启动 DSDIF，再启用 DSD 处理。
             dac.set_dsd_enabled(False)  # 修改为调用驱动封装，先关闭 DSD_EN 再上电 DSDIF。
@@ -139,4 +141,5 @@ def detect():
 if __name__ == "__main__":
     initialization()
     while True:
-        pass
+        if Pending == True:
+            pass
