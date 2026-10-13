@@ -8,7 +8,7 @@ FN_PINS = (1, 2, 3, 8)
 class Combo384():
     def __init__(self, PINS = FN_PINS):
         self.rate = (32000, 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000)
-        self.fn_pin = [Pin(n, Pin.IN, None) for n in PINS]
+        self.fn_pin = [Pin(n, Pin.IN) for n in PINS]  # 修改为SDK示例形式，省略不必要的None上拉参数。
 
     def Fn(self):
         fn = 0

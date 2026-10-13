@@ -19,8 +19,9 @@ SECH_OUT_PIN = 19
 HW_MUTE_PIN = 11
 DETBAL_L_PIN = 12
 DETBAL_R_PIN = 13
-DETSE_L_PIN = 162
+DETSE_L_PIN = 16
 DETSE_R_PIN = 17
+INT_PIN = 0
 
 rled_pin = Pin(RLED_PIN, Pin.OUT, value=0)
 gled_pin = Pin(GLED_PIN, Pin.OUT, value=0)
@@ -36,6 +37,7 @@ detbal_l_pin = Pin(DETBAL_L_PIN, Pin.IN)
 detbal_r_pin = Pin(DETBAL_R_PIN, Pin.IN)
 detse_l_pin = Pin(DETSE_L_PIN, Pin.IN)
 detse_r_pin = Pin(DETSE_R_PIN, Pin.IN)
+int_pin = Pin(INT_PIN, Pin.IN)
 
 Ctrl = combo384.Combo384()
 Left = cs43198.CS43198_L()
@@ -45,13 +47,25 @@ Pin_numbers = (combo384.FN_PINS[0], combo384.FN_PINS[1], combo384.FN_PINS[2], co
         cs43198.I2C1_SCL_PIN, cs43198.I2C1_SDA_PIN, DSDON_PIN, DSD_PIN, PLUG_PIN, PCMCH_PIN, BALCH_PIN,
         BALCH_OUT_PIN, SECH_OUT_PIN, HW_MUTE_PIN
         )
-global Pending
+Gpio_in = (pcm_pin, bal_pin, dsdon_pin, dsd_pin, plug_pin, detbal_l_pin, detbal_r_pin, detse_l_pin, detse_r_pin,
+           Ctrl.fn_pin[0], Ctrl.fn_pin[1], Ctrl.fn_pin[2], Ctrl.fn_pin[3])  # 修正为访问Combo384实例的输入引脚列表。
 Pending = False
+Dac_Interrupt_Pending = False
+Last_irq_ms = 0  # 新增软件去抖时间戳，记录最近一次被接受的GPIO中断时间。
+IRQ_DEBOUNCE_MS = 50  # 新增去抖窗口，过滤机械开关和耳机触点的重复边沿。
 
 
 
-def interrupt():
-    Pending = True
+def interrupt(pin=None):  # 修改为接收Pin.irq传入的引脚参数；本回调暂不读取该参数。
+    global Pending, Last_irq_ms  # 修正中断回调的作用域，使回调能够修改主循环读取的Pending。
+    now_ms = time.ticks_ms()  # 新增读取MicroPython单调毫秒计时器，用于软件去抖。
+    if time.ticks_diff(now_ms, Last_irq_ms) >= IRQ_DEBOUNCE_MS:  # 新增去抖判断，窗口内边沿不重复触发。
+        Pending = True  # 保留中断只置位标志，不在中断上下文执行detect或I2C操作。
+        Last_irq_ms = now_ms  # 新增记录本次已接受的中断时间。
+
+def dac_interrupt():
+    global Dac_Interrupt_Pending
+    Dac_Interrupt_Pending = True
 
 def hw_mute():
     hw_mute_pin.value(1)
@@ -139,7 +153,6 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             # 新增在 DSDIF 上电后启用 DSD 处理，落实规格书第 4.9 节要求的顺序。
             dac.set_dsd_enabled(True)  # 修改为调用驱动封装，接口上电后再使能 DSD 处理器。
         dac.power_down_control(power & 0xEF)  # 新增最后清除 PDN_HP，启动模拟 DAC 输出。
-
     time.sleep_ms(12)  # 新增等待两片输出完成防爆音上电，之后再恢复临时寄存器。
     for dac in dacs:
         dac.configure_popguard(False)  # 修改为调用驱动封装，恢复防爆音临时寄存器默认值。
@@ -169,13 +182,23 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             else:
                 # 新增检测未就绪时继续保持 PCM 静音，等待后续检测函数重新判断。
                 dac.mute_pcm(True)
+
+    # 新增初始化完成后统一开启所有输入GPIO的双边沿中断，避免配置期间触发无效事件。
+    for gpio in Gpio_in:
+        gpio.irq(handler=interrupt, trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING)
     
 def detect():
     pass
 
+def dac_detect():
+    pass
 
 if __name__ == "__main__":
     initialization()
     while True:
-        if Pending == True:
-            pass
+        if Pending:
+            Pending = False  # 新增在轮询取走事件后清除标志，允许下一次中断再次触发detect。
+            detect()
+        if Dac_Interrupt_Pending:
+            Dac_Interrupt_Pending = False
+            dac_detect()
