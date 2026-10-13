@@ -14,6 +14,13 @@ DSD_PIN = 21
 PLUG_PIN = 22
 PCMCH_PIN = 27
 BALCH_PIN = 28
+BALCH_OUT_PIN = 18
+SECH_OUT_PIN = 19
+HW_MUTE_PIN = 11
+DETBAL_L_PIN = 12
+DETBAL_R_PIN = 13
+DETSE_L_PIN = 162
+DETSE_R_PIN = 17
 
 rled_pin = Pin(RLED_PIN, Pin.OUT, value=0)
 gled_pin = Pin(GLED_PIN, Pin.OUT, value=0)
@@ -21,13 +28,22 @@ pcm_pin = Pin(PCMCH_PIN, Pin.IN)
 bal_pin = Pin(BALCH_PIN, Pin.IN)
 dsdon_pin = Pin(DSDON_PIN, Pin.IN)
 dsd_pin = Pin(DSD_PIN, Pin.IN)
+plug_pin = Pin(PLUG_PIN, Pin.IN)
+balch_out_pin = Pin(BALCH_OUT_PIN, Pin.OUT, value=0)
+sech_out_pin = Pin(SECH_OUT_PIN, Pin.OUT, value=0)
+hw_mute_pin = Pin(HW_MUTE_PIN, Pin.OUT, value=0)    #值为0时静音，值为1时取消静音
+detbal_l_pin = Pin(DETBAL_L_PIN, Pin.IN)
+detbal_r_pin = Pin(DETBAL_R_PIN, Pin.IN)
+detse_l_pin = Pin(DETSE_L_PIN, Pin.IN)
+detse_r_pin = Pin(DETSE_R_PIN, Pin.IN)
 
 Ctrl = combo384.Combo384()
 Left = cs43198.CS43198_L()
 Right = cs43198.CS43198_R()
 Pin_numbers = (combo384.FN_PINS[0], combo384.FN_PINS[1], combo384.FN_PINS[2], combo384.FN_PINS[3],
         MUTE_PIN, RLED_PIN, GLED_PIN, cs43198.RESET_PIN, cs43198.I2C0_SCL_PIN, cs43198.I2C0_SDA_PIN,
-        cs43198.I2C1_SCL_PIN, cs43198.I2C1_SDA_PIN, DSDON_PIN, DSD_PIN, PLUG_PIN, PCMCH_PIN, BALCH_PIN
+        cs43198.I2C1_SCL_PIN, cs43198.I2C1_SDA_PIN, DSDON_PIN, DSD_PIN, PLUG_PIN, PCMCH_PIN, BALCH_PIN,
+        BALCH_OUT_PIN, SECH_OUT_PIN, HW_MUTE_PIN
         )
 global Pending
 Pending = False
@@ -36,6 +52,9 @@ Pending = False
 
 def interrupt():
     Pending = True
+
+def hw_mute():
+    hw_mute_pin.value(1)
 
 def pcm_setrate():
     Left.mute_pcm()
@@ -129,10 +148,27 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             dac.mute_pcm(True)  # 修改为调用驱动封装，保持无流状态的 PCM 静音。
             dac.set_dsd_mute(True)  # 修改为调用驱动封装，保持无流状态的 DSD 静音。
         elif is_dsd:
-            # 新增 DSD 最终解除手动静音，保留软斜坡和自动静音设置。
-            dac.set_dsd_mute(False)  # 修改为调用驱动封装，DSD 上电完成后解除静音。
+            # 新增解除静音条件：必须已插入USB，且按平衡/单端模式确认对应左右检测均有效。
+            output_ready = (plug_pin.value() == 1 and
+                            ((bal_pin.value() == 1 and detbal_l_pin.value() == 1 and detbal_r_pin.value() == 1) or
+                             (bal_pin.value() == 0 and detse_l_pin.value() == 1 and detse_r_pin.value() == 1)))
+            if output_ready:
+                # 新增 DSD 最终解除手动静音，保留软斜坡和自动静音设置。
+                dac.set_dsd_mute(False)  # 修改为调用驱动封装，满足插入和输出检测后才解除静音。
+            else:
+                # 新增检测未就绪时继续保持 DSD 静音，避免无插入或输出检测异常时产生爆音。
+                dac.set_dsd_mute(True)
         else:
-            dac.mute_pcm(False)  # 修改原先永久静音的结尾，使初始化完成后 PCM 可以播放。
+            # 新增解除静音条件：必须已插入USB，且按平衡/单端模式确认对应左右检测均有效。
+            output_ready = (plug_pin.value() == 1 and
+                            ((bal_pin.value() == 1 and detbal_l_pin.value() == 1 and detbal_r_pin.value() == 1) or
+                             (bal_pin.value() == 0 and detse_l_pin.value() == 1 and detse_r_pin.value() == 1)))
+            if output_ready:
+                # 修改原先无条件解除静音的逻辑，满足插入和输出检测后才允许PCM播放。
+                dac.mute_pcm(False)
+            else:
+                # 新增检测未就绪时继续保持 PCM 静音，等待后续检测函数重新判断。
+                dac.mute_pcm(True)
     
 def detect():
     pass
