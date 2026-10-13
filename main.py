@@ -186,6 +186,7 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
     # 新增初始化完成后统一开启所有输入GPIO的双边沿中断，避免配置期间触发无效事件。
     for gpio in Gpio_in:
         gpio.irq(handler=interrupt, trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING)
+    int_pin.irq(handler=dac_interrupt, trigger=Pin.IRQ_FALLING)
     
 def detect():
     pass
