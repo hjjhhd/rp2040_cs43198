@@ -36,7 +36,8 @@ class _CS43198Base:
             sda=Pin(sda_pin),
             freq=freq,
         )
-        self.reset_pin = Pin(reset_pin, Pin.OUT, value=1) if reset_pin is not None else None
+        # 修正低侧NMOS反相逻辑：GPIO低电平关闭AO3400A，使CS43198的RESET由上拉保持释放。
+        self.reset_pin = Pin(reset_pin, Pin.OUT, value=0) if reset_pin is not None else None
 
     def write_reg(self, address, value):
         """向一个 24 位 MAP 地址写入一个 8 位寄存器值；超范围参数会报错。
@@ -97,13 +98,14 @@ class _CS43198Base:
         """通过共用 RESET GPIO 产生硬件复位脉冲；会同时复位左右两颗 CS43198。
 
         复位释放后至少等待芯片完成上电和 ADR 地址锁存，再调用其他寄存器方法；
-        默认等待时间按规格书的 1.5 ms 上电示例留有余量。1拉低reset,0拉高reset
+        默认等待时间按规格书的 1.5 ms 上电示例留有余量；GPIO=1拉低芯片RESET，GPIO=0释放芯片RESET。
         """
         if self.reset_pin is None:
             raise RuntimeError("创建对象时未配置 reset_pin")
+        # RESET低有效且GPIO经低侧NMOS反相：GPIO高电平导通NMOS，将RESET拉低执行复位。
         self.reset_pin.value(1)
         time.sleep_ms(low_ms)
-        self.reset_pin.value(0)
+        self.reset_pin.value(0)  # GPIO低电平关闭NMOS，释放RESET并等待ADR地址锁存和控制口就绪。
         time.sleep_ms(settle_ms)
 
     def read_device_id(self):
@@ -135,7 +137,9 @@ class _CS43198Base:
             code = reg.PCM_WORD_LENGTH_CODES[bits]
         except KeyError:
             raise ValueError("PCM 字长仅支持 8、16、24 或 32 位")
-        self.write_reg(reg.REG_SERIAL_SAMPLE_SIZE, 0x04 | code)
+        # 修正为读改写，只更新ASP位宽，避免覆盖已经配置的XSP位宽。
+        value = self.read_reg(reg.REG_SERIAL_SAMPLE_SIZE)
+        self.write_reg(reg.REG_SERIAL_SAMPLE_SIZE, (value & 0xFC) | code)
 
     def set_mclk_source(self, source, internal_mclk_hz):
         """设置内部 MCLK 源及其标称频率；PLL 模式须先完成 PLL 参数与启动。
@@ -174,8 +178,10 @@ class _CS43198Base:
         self.write_reg(reg.REG_ASP_CHANNEL_1_LOCATION, 0x00)
         self.write_reg(reg.REG_ASP_CHANNEL_2_LOCATION, 0x00)
         # I2S 示例使用 32 位数据；有效位字长由 ASP_SPSIZE 单独设置。
-        self.write_reg(reg.REG_ASP_CHANNEL_1_SIZE_ENABLE, phase | 0x07)
-        self.write_reg(reg.REG_ASP_CHANNEL_2_SIZE_ENABLE, phase | 0x07)
+        # 修正通道分辨率随word_length变化，避免16/24位输入仍被配置成32位通道。
+        resolution = {8: 0, 16: 1, 24: 2, 32: 3}[word_length]
+        self.write_reg(reg.REG_ASP_CHANNEL_1_SIZE_ENABLE, phase | 0x04 | resolution)
+        self.write_reg(reg.REG_ASP_CHANNEL_2_SIZE_ENABLE, phase | 0x04 | resolution)
         self.write_reg(reg.REG_PCM_FILTER_OPTION, 0x02)
         self.write_reg(reg.REG_PCM_VOLUME_A, 0x00)
         self.write_reg(reg.REG_PCM_VOLUME_B, 0x00)
@@ -267,8 +273,13 @@ class _CS43198Base:
 
     def configure_popguard(self, enabled=True):
         """配置规格书示例的 Popguard 辅助寄存器，降低 DAC 上电和下电瞬态。"""
-        self.write_reg(reg.REG_POPGUARD_CONTROL, 0x99 if enabled else 0x00)
-        self.write_reg(reg.REG_POPGUARD_TIMING, 0x20 if enabled else 0x00)
+        # 修正恢复顺序，严格遵循规格书上电示例：先恢复输出时序，再恢复控制寄存器。
+        if enabled:
+            self.write_reg(reg.REG_POPGUARD_CONTROL, 0x99)
+            self.write_reg(reg.REG_POPGUARD_TIMING, 0x20)
+        else:
+            self.write_reg(reg.REG_POPGUARD_TIMING, 0x00)
+            self.write_reg(reg.REG_POPGUARD_CONTROL, 0x00)
 
 
 class CS43198_L(_CS43198Base):

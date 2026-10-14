@@ -63,12 +63,31 @@ def interrupt(pin=None):  # 修改为接收Pin.irq传入的引脚参数；本回
         Pending = True  # 保留中断只置位标志，不在中断上下文执行detect或I2C操作。
         Last_irq_ms = now_ms  # 新增记录本次已接受的中断时间。
 
-def dac_interrupt():
+def dac_interrupt(pin=None):  # 修正Pin.irq回调签名，接收触发中断的引脚对象。
     global Dac_Interrupt_Pending
     Dac_Interrupt_Pending = True
 
-def hw_mute():
+def hw_mute(mute = True):
+    hw_mute_pin.value(1 if mute else 0)
+    time.sleep_ms(20)  # 修正延时单位：MicroPython的sleep参数为秒，这里需要20毫秒继电器稳定时间。
+    if mute:
+        balch_out_pin.value(0)
+        sech_out_pin.value(0)
+
+def hw_mode(mode):
+    # 新增先校验模式，错误参数不应改变现有继电器状态。
+    if mode not in ("balance", "single_end"):
+        raise ValueError("mode 必须为 balance 或 single_end")
+    # 新增切换前强制硬件静音，避免直接调用hw_mode时继电器切换产生爆音。
     hw_mute_pin.value(1)
+    time.sleep_ms(20)  # 新增继电器切换前的静音建立时间。
+    # 新增先断后通，避免由单端切到平衡时两组继电器短暂同时接通。
+    balch_out_pin.value(0)
+    sech_out_pin.value(0)
+    time.sleep_ms(20)  # 新增等待旧触点释放，再接通目标输出。
+    balch_out_pin.value(1 if mode == "balance" else 0)
+    sech_out_pin.value(1 if mode == "single_end" else 0)
+    time.sleep_ms(20)  # 新增继电器动作后的稳定时间；函数返回时仍保持硬件静音。
 
 def pcm_setrate():
     Left.mute_pcm()
@@ -86,6 +105,7 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
     L_ID = None
     R_ID = None
     dacs = (Left, Right)  # 新增统一对象列表，保证左右两片执行相同的上电步骤。
+    hw_mute(True)  # 新增复位前建立硬件静音，遮蔽复位和后续DAC上电瞬态。
     Left.reset()  # 保留共用复位调用；驱动内部已有复位后的 3 ms 等待。
     # 修改 ID 检测：验证完整器件 ID，并对 I2C 异常进行最多十次重试。
     for attempt in range(10):
@@ -113,11 +133,19 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
     dsdon_state = dsdon_pin.value()
     format_valid = pcmch_state ^ dsdon_state
     is_dsd = bool(dsdon_state) if format_valid else False
+    output_ready = False  # 新增默认未就绪状态，避免无有效格式时引用未赋值变量。
+    # 新增初始化阶段先建立硬件静音，后续所有继电器模式切换均在静音状态下进行。
+    hw_mute(True)
+    if bal_pin.value() == 1:
+        hw_mode("balance")  # 新增根据当前输出选择设置平衡继电器模式。
+    else:
+        hw_mode("single_end")  # 新增根据当前输出选择设置单端继电器模式。
     if not format_valid:
         for dac in dacs:
             # 新增无有效音频流时主动保持PCM和DSD路径静音，避免启动时输出未定义数据。
             dac.mute_pcm(True)  # 修改为调用驱动封装，保持 PCM 路径静音。
             dac.set_dsd_mute(True)  # 修改为调用驱动封装，保持 DSD 路径静音。
+            hw_mute(True)  # 新增对应硬件静音，确保无效格式时继电器也保持断开。
     elif is_dsd:
         for dac in dacs:
             # 新增读取Combo384第16脚DSD64_128状态：低为DSD64，高为DSD128。
@@ -127,6 +155,7 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             dac.set_dsd_enabled(False)  # 修改为调用驱动封装，先关闭 DSD_EN 再上电 DSDIF。
             # 新增 DSD 软斜坡、双通道音量联动和自动静音；上电期间保持手动静音。
             dac.set_dsd_mute(True)  # 修改为调用驱动封装，DSD 配置期间保持静音。
+            hw_mute(True)  # 新增对应硬件静音，确保DSD配置期间不会经过继电器输出。
     else:
         # 修改PCM初始化：使用驱动配置采样率、字长、I2S从机和单声道；主从机模式下这些是必要项。
         for dac in dacs:
@@ -134,6 +163,7 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             # 删除对主机模式分频寄存器的写入：CS43198此处为从机，分频输出参数不参与时钟生成。
             # 新增 PCM 软斜坡、双通道音量联动及自动静音；初始化结束前保持数字静音。
             dac.mute_pcm(True)  # 修改为调用驱动封装，PCM 配置期间保持静音。
+            hw_mute(True)  # 新增对应硬件静音，确保PCM配置期间不会经过继电器输出。
 
     for dac in dacs:
         # 新增明确的模拟输出设置：沿用规格书内部 VCPFILT、高电压模式的默认电源方案。
@@ -160,6 +190,7 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             # 新增无有效格式时继续保持两条数字路径静音，等待后续检测函数确认模式。
             dac.mute_pcm(True)  # 修改为调用驱动封装，保持无流状态的 PCM 静音。
             dac.set_dsd_mute(True)  # 修改为调用驱动封装，保持无流状态的 DSD 静音。
+            hw_mute(True)  # 新增对应硬件静音，等待后续检测函数确认有效音源。
         elif is_dsd:
             # 新增解除静音条件：必须已插入USB，且按平衡/单端模式确认对应左右检测均有效。
             output_ready = (plug_pin.value() == 1 and
@@ -182,6 +213,14 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             else:
                 # 新增检测未就绪时继续保持 PCM 静音，等待后续检测函数重新判断。
                 dac.mute_pcm(True)
+
+    # 新增最终硬件解除静音：只有软件路径已满足输出检测条件时才释放继电器静音。
+    if format_valid and output_ready:
+        # 新增恢复被hw_mute(True)断开的输出继电器；模式切换期间仍保持硬件静音。
+        hw_mode("balance" if bal_pin.value() == 1 else "single_end")
+        hw_mute(False)
+    else:
+        hw_mute(True)
 
     # 新增初始化完成后统一开启所有输入GPIO的双边沿中断，避免配置期间触发无效事件。
     for gpio in Gpio_in:
