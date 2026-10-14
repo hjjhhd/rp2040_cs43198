@@ -224,8 +224,9 @@ class _CS43198Base:
         self.write_reg(reg.REG_DSD_INTERFACE_CONFIG, 0x00)  # DSD 时钟从模式
         self.write_reg(reg.REG_DSD_VOLUME_A, 0x00)
         self.write_reg(reg.REG_DSD_VOLUME_B, 0x00)
-        # DSD_EN=1，静态/无效 DSD 检测开启，DSD_PRC_SRC=00 选择专用 DSDIF。
-        value = 0x10 | (speed << 2) | 0x03
+        # 修改为先保持DSD_EN=0：规格书要求先配置并上电DSDIF，最后才使能DSD处理器，避免切换瞬间把未稳定数据送入模拟路径。
+        # bit3:2选择DSD64/DSD128，bit1:0开启静态/无效DSD检测，DSD_PRC_SRC=00选择专用DSDIF。
+        value = (speed << 2) | 0x03
         self.write_reg(reg.REG_DSD_PATH_CONTROL_2, value)
         # 左片用 C5，右片用 C7：规格书 mono DSD 示例的 channel A/B 组合。
         self.write_reg(reg.REG_DSD_PATH_CONTROL_3, 0xC7 if self.side == "right" else 0xC5)
@@ -250,6 +251,23 @@ class _CS43198Base:
         各 PDN 位为 1 表示对应模块掉电；错误顺序可能导致爆音或时钟/数据通路异常。
         """
         self.write_reg(reg.REG_POWER_DOWN, value)
+
+    def power_down_playback(self, timeout_ms=100):
+        """关闭模拟输出并等待 PDN_DONE，供运行中切换音频接口前使用。"""
+        # 规格书要求先开放并清除PDN_DONE事件，关闭PDN_HP后才可关闭ASP或DSDIF。
+        mask = self.read_reg(reg.REG_INTERRUPT_MASK_1)
+        self.write_reg(reg.REG_INTERRUPT_MASK_1, mask & 0xFE)
+        self.read_reg(reg.REG_INTERRUPT_STATUS_1)
+        power = self.read_reg(reg.REG_POWER_DOWN)
+        if power & 0x10:
+            return power
+        self.power_down_control(power | 0x10)
+        start = time.ticks_ms()
+        while time.ticks_diff(time.ticks_ms(), start) < timeout_ms:
+            if self.read_reg(reg.REG_INTERRUPT_STATUS_1) & 0x01:
+                return power | 0x10
+            time.sleep_ms(1)
+        raise RuntimeError("CS43198 等待 PDN_DONE 超时")
 
     def set_dsd_mute(self, mute=True):
         """设置 DSD A/B 通道手动静音；保留其余 DSD 路径控制位不变。"""
