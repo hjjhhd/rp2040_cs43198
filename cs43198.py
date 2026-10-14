@@ -173,7 +173,7 @@ class _CS43198Base:
         self.write_reg(reg.REG_ASP_FRAME_CONFIG, 0x0A)
         # I2S 时钟极性使用规格书示例值；主从位按调用方选择。
         self.write_reg(reg.REG_ASP_CLOCK_CONFIG, 0x0C | (0x10 if role == "master" else 0))
-        # 单声道输入时两个通道选择相同时隙；左/右由 active phase 区分。
+        # 修正为只启用接收通道1：左右芯片分别从左/右时隙取流，避免两个接收通道覆盖同一时隙。
         phase = 0x08 if self.side == "right" else 0x00
         self.write_reg(reg.REG_ASP_CHANNEL_1_LOCATION, 0x00)
         self.write_reg(reg.REG_ASP_CHANNEL_2_LOCATION, 0x00)
@@ -181,7 +181,9 @@ class _CS43198Base:
         # 修正通道分辨率随word_length变化，避免16/24位输入仍被配置成32位通道。
         resolution = {8: 0, 16: 1, 24: 2, 32: 3}[word_length]
         self.write_reg(reg.REG_ASP_CHANNEL_1_SIZE_ENABLE, phase | 0x04 | resolution)
-        self.write_reg(reg.REG_ASP_CHANNEL_2_SIZE_ENABLE, phase | 0x04 | resolution)
+        self.write_reg(reg.REG_ASP_CHANNEL_2_SIZE_ENABLE, resolution)  # 关闭接收通道2，保留合法的通道分辨率。
+        # 在PCM处理路径将A复制到B；不使用交换或反相位，避免引入额外的交换/反相校准要求。
+        self.write_reg(reg.REG_PCM_PATH_CONTROL_2, 0x01)
         self.write_reg(reg.REG_PCM_FILTER_OPTION, 0x02)
         self.write_reg(reg.REG_PCM_VOLUME_A, 0x00)
         self.write_reg(reg.REG_PCM_VOLUME_B, 0x00)
@@ -225,7 +227,8 @@ class _CS43198Base:
         self.write_reg(reg.REG_DSD_VOLUME_A, 0x00)
         self.write_reg(reg.REG_DSD_VOLUME_B, 0x00)
         # 修改为先保持DSD_EN=0：规格书要求先配置并上电DSDIF，最后才使能DSD处理器，避免切换瞬间把未稳定数据送入模拟路径。
-        # bit3:2选择DSD64/DSD128，bit1:0开启静态/无效DSD检测，DSD_PRC_SRC=00选择专用DSDIF。
+        # bit3:2选择DSD64/128/256；DIR_DSD=0使用处理器模式，不能以Direct DSD的128倍速上限限制此模式。
+        # bit1:0开启静态/无效DSD检测，DSD_PRC_SRC=00选择专用DSDIF。
         value = (speed << 2) | 0x03
         self.write_reg(reg.REG_DSD_PATH_CONTROL_2, value)
         # 左片用 C5，右片用 C7：规格书 mono DSD 示例的 channel A/B 组合。

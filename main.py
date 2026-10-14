@@ -99,15 +99,23 @@ def pcm_setrate():
     # 采样率变化复用完整的静音、掉电、时钟切换和继电器恢复顺序，避免此入口提前解除DAC静音。
     detect()
 
-def initialization():  # 修改为一次性启动初始化；持续监测和格式切换由主循环/检测函数负责。
-    # 新增函数内全局声明和初值，替代原先未初始化变量的无限等待循环。
-    global L_ID, R_ID, Pending  # 新增Pending全局声明，继电器稳定期间输入改变时可安排主循环重新检测。
+def initialization():
+    # 启动入口捕获I2C异常和掉电超时：立即断开硬件输出，禁止异常后继续解除静音。
+    try:
+        _initialization()
+    except Exception:
+        hw_mute(True)
+        raise
+
+
+def _initialization():
+    # 复位前无法依赖数字静音，因此先建立硬件静音，再复位两片共用RESET的DAC。
+    global L_ID, R_ID
+    hw_mute(True)
+    Left.reset()
     L_ID = None
     R_ID = None
-    dacs = (Left, Right)  # 新增统一对象列表，保证左右两片执行相同的上电步骤。
-    hw_mute(True)  # 新增复位前建立硬件静音，遮蔽复位和后续DAC上电瞬态。
-    Left.reset()  # 保留共用复位调用；驱动内部已有复位后的 3 ms 等待。
-    # 修改 ID 检测：验证完整器件 ID，并对 I2C 异常进行最多十次重试。
+    # 器件ID校验保留有限重试，持续失败由外层异常保护保持继电器断开。
     for attempt in range(10):
         try:
             L_ID = Left.read_device_id()
@@ -115,133 +123,38 @@ def initialization():  # 修改为一次性启动初始化；持续监测和格�
             if L_ID == (0x43, 0x19, 0x80) and R_ID == (0x43, 0x19, 0x80):
                 break
         except OSError:
-            pass  # 新增有限重试处理；持续失败时由循环结束后的异常报告。
-        time.sleep_ms(3)  # 新增重试间隔，避免连续访问尚未就绪的控制口。
+            pass
+        time.sleep_ms(3)
     else:
         raise RuntimeError("CS43198 器件 ID 校验失败：左={}，右={}".format(L_ID, R_ID))
 
-    # 修改为按项目约定读取一次当前时钟和采样率，避免左右芯片取得不同配置快照。
-    # 外部 MCLK 必须已稳定且持续存在；软件延时无法证明外部时钟实际有效。
-    mclk_hz = Ctrl.Mclk_Hz_pcm()
-    sample_rate = Ctrl.rate[Ctrl.Fn()]
-    for dac in dacs:
-        # DSD时F0只参与倍速编码，不能用PCM的F0时钟族算法；未知时先使用片内RCO并保持静音。
-        dac.set_mclk_source("rco" if dsdon_pin.value() else "direct",
-                            22_579_200 if dsdon_pin.value() else mclk_hz)
-        # 新增先关闭DSD处理器：启动时先清除复位后可能保留的DSD_EN，之后再按已检测模式启用。
-        dac.set_dsd_enabled(False)
-    time.sleep_us(150)  # 新增规格书要求的时钟源切换等待，之后才访问音频配置。
-
-    # 修改为PCMCH与DSDON异或确认格式；00/11均代表无效或冲突，必须保持静音。
-    pcmch_state = pcm_pin.value()
-    dsdon_state = dsdon_pin.value()
-    configured_state = tuple(gpio.value() for gpio in Gpio_in)  # 记录配置开始时的输入，避免上电过程中源或输出模式变化后放行旧配置。
-    format_valid = pcmch_state ^ dsdon_state
-    is_dsd = bool(dsdon_state) if format_valid else False
-    # 新版规格书用F0-F3报告DSD倍速；仅接纳现有硬件需求的DSD64/128，其余状态保持静音。
-    dsd_rate = None
-    if is_dsd:
-        try:
-            dsd_rate = Ctrl.Dsd_rate()
-        except ValueError:
-            format_valid = False
-        if dsd_rate not in (64, 128):
-            format_valid = False
-        # DSD64/128均可能属于44.1kHz或48kHz时钟族；未确认第6脚实际MCLK前不启动输出。
-        if DSD_MCLK_HZ not in (22_579_200, 24_576_000):
-            format_valid = False
-        if not format_valid:
-            is_dsd = False
-    output_ready = False  # 新增默认未就绪状态，避免无有效格式时引用未赋值变量。
-    # 新增初始化阶段先建立硬件静音，后续所有继电器模式切换均在静音状态下进行。
-    hw_mute(True)
-    if bal_pin.value() == 1:
-        hw_mode("balance")  # 新增根据当前输出选择设置平衡继电器模式。
-    else:
-        hw_mode("single_end")  # 新增根据当前输出选择设置单端继电器模式。
-    if not format_valid:
-        for dac in dacs:
-            # 新增无有效音频流时主动保持PCM和DSD路径静音，避免启动时输出未定义数据。
-            dac.mute_pcm(True)  # 修改为调用驱动封装，保持 PCM 路径静音。
-            dac.set_dsd_mute(True)  # 修改为调用驱动封装，保持 DSD 路径静音。
-            hw_mute(True)  # 新增对应硬件静音，确保无效格式时继电器也保持断开。
-    elif is_dsd:
-        for dac in dacs:
-            # 修改为使用F0-F3解码后的DSD64/128，不再读取新版规格书中用于S/PDIF切换的排针16脚。
-            dac.configure_dsd_mono(dsd_rate)
-            # 新增清除提前设置的 DSD_EN，确保后续先启动 DSDIF，再启用 DSD 处理。
-            dac.set_dsd_enabled(False)  # 修改为调用驱动封装，先关闭 DSD_EN 再上电 DSDIF。
-            # 新增 DSD 软斜坡、双通道音量联动和自动静音；上电期间保持手动静音。
-            dac.set_dsd_mute(True)  # 修改为调用驱动封装，DSD 配置期间保持静音。
-            hw_mute(True)  # 新增对应硬件静音，确保DSD配置期间不会经过继电器输出。
-    else:
-        # 修改PCM初始化：使用驱动配置采样率、字长、I2S从机和单声道；主从机模式下这些是必要项。
-        for dac in dacs:
-            dac.configure_i2s_mono(sample_rate, word_length=32, role="slave")
-            # 新增切换到PCM时明确关闭残留的DSD处理器，避免上一次DSD播放状态继续作用于PCM数据。
-            dac.set_dsd_enabled(False)
-            # 删除对主机模式分频寄存器的写入：CS43198此处为从机，分频输出参数不参与时钟生成。
-            # 新增 PCM 软斜坡、双通道音量联动及自动静音；初始化结束前保持数字静音。
-            dac.mute_pcm(True)  # 修改为调用驱动封装，PCM 配置期间保持静音。
-            hw_mute(True)  # 新增对应硬件静音，确保PCM配置期间不会经过继电器输出。
-
-    for dac in dacs:
-        # 新增明确的模拟输出设置：沿用规格书内部 VCPFILT、高电压模式的默认电源方案。
-        # 该方案要求 VP 至少 3.3 V、负载至少 600 欧姆；输出满量程选规格书示例 1.732 Vrms。
-        dac.configure_class_h()  # 修改为调用驱动封装，使用内部 VCPFILT 的 Class H 配置。
-        dac.configure_analog_output()  # 修改为调用驱动封装，设置规格书示例输出满量程。
-        # 新增读取状态以清除复位后的粘滞事件，不在这里启用未处理的外部中断。
-        dac.read_reg(cs43198_reg.REG_INTERRUPT_STATUS_1)
-        dac.read_reg(0x0F0004 if is_dsd else 0x0F0001)
-        # 新增规格书例5-3/5-4的防爆音准备写入，必须先于接口及DAC上电。
-        dac.configure_popguard(True)  # 修改为调用驱动封装，准备防爆音上电。
-        # 新增接口上电：只清除当前播放接口的掉电位，其余电源位保持不变。
-        power = dac.read_reg(cs43198_reg.REG_POWER_DOWN)
-        power &= 0xDF if is_dsd else 0xBF
-        dac.power_down_control(power)
-        if is_dsd:
-            # 新增在 DSDIF 上电后启用 DSD 处理，落实规格书第 4.9 节要求的顺序。
-            dac.set_dsd_enabled(True)  # 修改为调用驱动封装，接口上电后再使能 DSD 处理器。
-        dac.power_down_control(power & 0xEF)  # 新增最后清除 PDN_HP，启动模拟 DAC 输出。
-    time.sleep_ms(12)  # 新增等待两片输出完成防爆音上电，之后再恢复临时寄存器。
-    for dac in dacs:
-        dac.configure_popguard(False)  # 修改为调用驱动封装，恢复防爆音临时寄存器默认值。
-        # 模拟输出已完成上电，但两种数字路径继续静音，直到继电器接通并稳定。
+    # 复位后保留默认RCO与接口/模拟输出掉电状态；先建立数字静音并配置模拟参数。
+    for dac in (Left, Right):
         dac.mute_pcm(True)
         dac.set_dsd_mute(True)
-
-    # 先核验插入、输出模式与左右检测；不满足时保持继电器断开和DAC静音。
-    output_ready = (plug_pin.value() == 1 and
-                    ((bal_pin.value() == 1 and detbal_l_pin.value() == 1 and detbal_r_pin.value() == 1) or
-                     (bal_pin.value() == 0 and detse_l_pin.value() == 1 and detse_r_pin.value() == 1)))
-    if format_valid and output_ready and tuple(gpio.value() for gpio in Gpio_in) == configured_state:
-        # 先选择输出继电器、解除硬件静音，再等待触点和模拟端稳定，最后解除DAC数字静音。
-        ready_state = tuple(gpio.value() for gpio in Gpio_in)  # 记录接通前的全部输入，避免等待期间切换到另一有效模式后仍沿用旧配置。
-        hw_mode("balance" if bal_pin.value() == 1 else "single_end")
-        hw_mute(False)
-        time.sleep_ms(RELAY_SETTLE_MS)
-        # 接通期间任一监测脚变化都重新断开继电器，避免旧DAC配置解除静音。
-        if tuple(gpio.value() for gpio in Gpio_in) != ready_state:
-            hw_mute(True)
-            Pending = True
-        else:
-            for dac in dacs:
-                if is_dsd:
-                    dac.set_dsd_mute(False)
-                else:
-                    dac.mute_pcm(False)
-    else:
-        hw_mute(True)
-        # 上电过程中输入若已改变，中断尚未启用，主动安排主循环重新检测。
-        if tuple(gpio.value() for gpio in Gpio_in) != configured_state:
-            Pending = True
-
-    # 新增初始化完成后统一开启所有输入GPIO的双边沿中断，避免配置期间触发无效事件。
+        dac.set_dsd_enabled(False)
+        dac.configure_class_h()
+        dac.configure_analog_output()
+    # 启动与运行切换共用同一套消抖、原始编码校验和MUTE检查，避免无效格式仍启动ASP或HP。
+    detect()
+    # 完成初始化后启用输入双边沿中断，并安排复查，覆盖启用中断前短窗口内的状态变化。
     for gpio in Gpio_in:
         gpio.irq(handler=interrupt, trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING)
     int_pin.irq(handler=dac_interrupt, trigger=Pin.IRQ_FALLING)
-    
+    global Pending  # 初始化末尾主动复查不经过中断去抖，避免短窗口事件遗漏。
+    Pending = True
+
+
 def detect():
+    # 所有播放切换异常均优先硬件静音；重新抛出错误用于定位，不允许接着执行恢复播放。
+    try:
+        _detect()
+    except Exception:
+        hw_mute(True)
+        raise
+
+
+def _detect():
     global Pending  # 检测期间输入仍有变化时，重新置位供主循环再次处理。
     # 正常切换先静音两片DAC并等待数字斜坡结束，再断开继电器，降低触点切换时的输出阶跃。
     dacs = (Left, Right)
@@ -274,12 +187,12 @@ def detect():
     time.sleep_us(150)
 
     # 没有确定格式或USB未连接时停在RCO和DAC掉电状态，避免无效时钟进入播放路径。
-    if not format_valid or not plug:
+    if not format_valid or not plug or state[0]:  # Combo384的MUTE=1时禁止启动接口和模拟输出。
         return
 
     # Fn会把9至15钳位到384kHz；PCM模式先检查原始四位编码，避免把无效状态误配置为384kHz。
     rate_code = sum(value << bit for bit, value in enumerate(state[9:13]))
-    # 新版规格书的DSD编码为9至12；用驱动Dsd_rate()解码，仅接纳本项目支持的64/128。
+    # 新版规格书的DSD编码为9至12；用驱动Dsd_rate()解码，按CS43198处理器模式接纳64/128/256，拒绝板卡可报告但DAC不支持的512。
     if not is_dsd and rate_code > 8:
         return
     dsd_rate = None
@@ -288,7 +201,7 @@ def detect():
             dsd_rate = Ctrl.Dsd_rate()
         except ValueError:
             return
-        if dsd_rate not in (64, 128):
+        if dsd_rate not in cs43198_reg.DSD_RATE_CODES:  # 与驱动的DSD_SPEED有效编码表保持一致。
             return
         # 驱动再次读F脚时若发生变化，保持静音并安排下一次稳定状态检测。
         if tuple(gpio.value() for gpio in Gpio_in) != state:
