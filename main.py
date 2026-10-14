@@ -264,14 +264,56 @@ def _detect():
             dac.mute_pcm(False)
 
 def dac_detect():
-    pass
+    # DAC中断处理先执行最低爆音风险的数字静音，再等待软斜坡衰减后断开硬件继电器。
+    dacs = (Left, Right)
+    try:
+        for dac in dacs:
+            dac.mute_pcm(True)
+            dac.set_dsd_mute(True)
+        time.sleep_ms(DAC_MUTE_SETTLE_MS)
+        hw_mute(True)
+
+        # 调试和状态读取必须分别走左右DAC对象，禁止混用I2C总线；错误处理由dac_debug封装。
+        left_errors = Left.dac_debug()
+        right_errors = Right.dac_debug()
+        # 保存本次两侧结果，供后续普通detect或主循环诊断使用；不把左右错误混在一起。
+        global Dac_debug_errors_l, Dac_debug_errors_r
+        Dac_debug_errors_l = left_errors
+        Dac_debug_errors_r = right_errors
+
+        # 按要求交给普通detect完成重新读取输入、重新配置DAC以及最终解除静音。
+        detect()
+    except Exception:
+        # 调试或普通检测任一步失败时，保持硬件静音，避免异常状态下恢复输出。
+        hw_mute(True)
+        raise
 
 if __name__ == "__main__":
-    initialization()
+    # 初始化或检测流程发生异常时锁存红灯；只有正常进入并持续运行主循环才点亮绿灯。
+    dac_logic_error = False
+    try:
+        initialization()
+        gled_pin.value(1)  # 初始化成功且主循环可以正常运行，点亮绿灯。
+        rled_pin.value(0)  # 正常状态关闭红灯。
+    except Exception:
+        gled_pin.value(0)  # 初始化失败时关闭绿灯。
+        rled_pin.value(1)  # 初始化失败时点亮红灯。
+        dac_logic_error = True
+
     while True:
-        if Pending:
-            Pending = False  # 新增在轮询取走事件后清除标志，允许下一次中断再次触发detect。
-            detect()
-        if Dac_Interrupt_Pending:
-            Dac_Interrupt_Pending = False
-            dac_detect()
+        try:
+            if Pending:
+                Pending = False  # 新增在轮询取走事件后清除标志，允许下一次中断再次触发detect。
+                detect()
+            if Dac_Interrupt_Pending:
+                Dac_Interrupt_Pending = False
+                dac_detect()
+            if not dac_logic_error:
+                gled_pin.value(1)  # 本轮逻辑正常完成，保持绿灯。
+                rled_pin.value(0)  # 本轮逻辑正常完成，关闭红灯。
+        except Exception:
+            # initialization、detect或dac_detect报错时锁存红灯，避免异常状态显示为正常。
+            gled_pin.value(0)
+            rled_pin.value(1)
+            dac_logic_error = True
+            hw_mute(True)  # 出错后保持硬件静音，防止异常状态继续输出声音。

@@ -15,6 +15,63 @@ I2C0_SDA_PIN = 4
 I2C1_SCL_PIN = 7
 I2C1_SDA_PIN = 6
 
+# 左声道CS43198规格书中的状态/错误名称；这些字符串供后续dac_detect()按左侧I2C总线读取状态后判断使用。
+Dac_errors_l = (
+    "dac_overflow",             # DAC溢出
+    "xtal_ready",               # 晶体振荡器就绪状态
+    "xtal_error",               # 晶体振荡器错误
+    "pll_ready",                # PLL锁定就绪状态
+    "pll_error",                # PLL错误
+    "pdn_done",                 # 掉电流程完成
+    "asp_overflow",             # PCM/ASP接口溢出
+    "asp_error",                # PCM/ASP接口错误
+    "asp_late",                 # PCM/ASP接口数据晚到
+    "asp_early",                # PCM/ASP接口数据早到
+    "asp_no_lrck",              # PCM/ASP接口未检测到LRCK
+    "xsp_overflow",             # 原生DSD/XSP接口溢出
+    "xsp_error",                # 原生DSD/XSP接口错误
+    "xsp_late",                 # 原生DSD/XSP接口数据晚到
+    "xsp_early",                # 原生DSD/XSP接口数据早到
+    "xsp_no_lrck",              # 原生DSD/XSP接口未检测到LRCK
+    "dsd_stuck",                # DSD数据保持不变或卡死
+    "dsd_channel_a_invalid",    # DSD通道A数据无效
+    "dsd_channel_b_invalid",    # DSD通道B数据无效
+    "dsd_channel_a_silence",    # DSD通道A静音
+    "dsd_channel_b_silence",    # DSD通道B静音
+    "dsd_rate_error",           # DSD速率错误
+    "dop_marker_detected",      # 检测到DoP标记
+    "dop_engine_on",            # DoP引擎工作状态
+    "i2c_error",                # 本侧DAC的I2C通信错误
+)
+# 右声道CS43198使用独立元组，后续必须通过右侧I2C总线单独写入和判断，避免左右错误混淆。
+Dac_errors_r = (
+    "dac_overflow",             # DAC溢出
+    "xtal_ready",               # 晶体振荡器就绪状态
+    "xtal_error",               # 晶体振荡器错误
+    "pll_ready",                # PLL锁定就绪状态
+    "pll_error",                # PLL错误
+    "pdn_done",                 # 掉电流程完成
+    "asp_overflow",             # PCM/ASP接口溢出
+    "asp_error",                # PCM/ASP接口错误
+    "asp_late",                 # PCM/ASP接口数据晚到
+    "asp_early",                # PCM/ASP接口数据早到
+    "asp_no_lrck",              # PCM/ASP接口未检测到LRCK
+    "xsp_overflow",             # 原生DSD/XSP接口溢出
+    "xsp_error",                # 原生DSD/XSP接口错误
+    "xsp_late",                 # 原生DSD/XSP接口数据晚到
+    "xsp_early",                # 原生DSD/XSP接口数据早到
+    "xsp_no_lrck",              # 原生DSD/XSP接口未检测到LRCK
+    "dsd_stuck",                # DSD数据保持不变或卡死
+    "dsd_channel_a_invalid",    # DSD通道A数据无效
+    "dsd_channel_b_invalid",    # DSD通道B数据无效
+    "dsd_channel_a_silence",    # DSD通道A静音
+    "dsd_channel_b_silence",    # DSD通道B静音
+    "dsd_rate_error",           # DSD速率错误
+    "dop_marker_detected",      # 检测到DoP标记
+    "dop_engine_on",            # DoP引擎工作状态
+    "i2c_error",                # 本侧DAC的I2C通信错误
+)
+
 class _CS43198Base:
     """封装 CS43198 的 24 位寄存器 I2C 访问和通用播放控制。"""
 
@@ -301,6 +358,80 @@ class _CS43198Base:
         else:
             self.write_reg(reg.REG_POPGUARD_TIMING, 0x00)
             self.write_reg(reg.REG_POPGUARD_CONTROL, 0x00)
+
+    def dac_debug(self):
+        """读取本 DAC 的中断状态并执行一次安全的状态清理，返回错误字符串列表。
+
+        本函数只访问当前对象所属的 I2C 总线；左、右 DAC 必须分别调用，不能
+        用一条总线代替另一条总线。状态寄存器按规格书为读清除寄存器，因此先
+        保存读取值，再按位转换为错误名称。就绪类状态不作为错误返回。
+        """
+        errors = []
+        try:
+            # 先确认当前I2C通道仍能访问本侧DAC；通信失败必须作为本侧错误返回。
+            self.read_device_id()
+            status_1 = self.read_reg(reg.REG_INTERRUPT_STATUS_1)
+            status_2 = self.read_reg(reg.REG_INTERRUPT_STATUS_2)
+            status_3 = self.read_reg(reg.REG_INTERRUPT_STATUS_3)
+            status_5 = self.read_reg(reg.REG_INTERRUPT_STATUS_5)
+        except (OSError, RuntimeError, ValueError):
+            # 不能把I2C读失败误判为无错误；由上层保持硬件静音并等待下一次检测。
+            return ["i2c_error"]
+
+        # 状态1中的耳机插拔位对应悬空电路引脚，按要求不参与判断。
+        status_1_map = (
+            (0x01, "dac_overflow"),
+            (0x08, "xtal_ready"),
+            (0x10, "xtal_error"),
+            (0x20, "pll_ready"),
+            (0x40, "pll_error"),
+            (0x80, "pdn_done"),
+        )
+        # 状态2为PCM/ASP接口状态；状态3为原生DSD/XSP接口状态。
+        status_2_map = (
+            (0x01, "asp_overflow"),
+            (0x02, "asp_error"),
+            (0x04, "asp_late"),
+            (0x08, "asp_early"),
+            (0x10, "asp_no_lrck"),
+        )
+        status_3_map = (
+            (0x01, "xsp_overflow"),
+            (0x02, "xsp_error"),
+            (0x04, "xsp_late"),
+            (0x08, "xsp_early"),
+            (0x10, "xsp_no_lrck"),
+        )
+        # 状态5为DSD/DoP检测状态；这些状态均保留给上层判断是否需要重配。
+        status_5_map = (
+            (0x01, "dsd_stuck"),
+            (0x02, "dsd_channel_a_invalid"),
+            (0x04, "dsd_channel_b_invalid"),
+            (0x08, "dsd_channel_a_silence"),
+            (0x10, "dsd_channel_b_silence"),
+            (0x20, "dsd_rate_error"),
+            (0x40, "dop_marker_detected"),
+            (0x80, "dop_engine_on"),
+        )
+        # 只接受当前声道对应的错误元组中的名称，保证后续判断使用统一字符串。
+        error_names = Dac_errors_l if self.side == "left" else Dac_errors_r
+        for value, mapping in ((status_1, status_1_map), (status_2, status_2_map),
+                               (status_3, status_3_map), (status_5, status_5_map)):
+            for mask, name in mapping:
+                if value & mask and name in error_names:
+                    errors.append(name)
+
+        # 读清除后再次读取状态，确认仍存在的故障交给后续普通detect重配处理。
+        # 这里只做确认，不在此处复位共用RESET，避免影响另一侧DAC。
+        try:
+            self.read_reg(reg.REG_INTERRUPT_STATUS_1)
+            self.read_reg(reg.REG_INTERRUPT_STATUS_2)
+            self.read_reg(reg.REG_INTERRUPT_STATUS_3)
+            self.read_reg(reg.REG_INTERRUPT_STATUS_5)
+        except (OSError, RuntimeError, ValueError):
+            if "i2c_error" not in errors:
+                errors.append("i2c_error")
+        return errors
 
 
 class CS43198_L(_CS43198Base):
