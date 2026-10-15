@@ -80,7 +80,7 @@ class _CS43198Base:
         """创建一颗 DAC 的驱动对象；引脚仍为占位值，初始化不执行播放配置。
 
         i2c 可传入预先创建的 machine.I2C；否则按 bus_id、SCL、SDA 创建硬件总线。
-        RESET 两颗芯片共用，构造时只将其释放为高电平，不会执行复位脉冲。
+        RESET 两颗芯片共用，构造时将GPIO置高以释放CS43198的RESET，不会执行复位脉冲。
         """
         self.address = address
         self.side = side
@@ -93,8 +93,8 @@ class _CS43198Base:
             sda=Pin(sda_pin),
             freq=freq,
         )
-        # 修正低侧NMOS反相逻辑：GPIO低电平关闭AO3400A，使CS43198的RESET由上拉保持释放。
-        self.reset_pin = Pin(reset_pin, Pin.OUT, value=0) if reset_pin is not None else None
+        # 使用正相RESET逻辑：GPIO低电平对应CS43198复位，构造时置高使RESET保持释放。
+        self.reset_pin = Pin(reset_pin, Pin.OUT, value=0) if reset_pin is not None else None    #初始为0，拉低dac的reset
 
     def write_reg(self, address, value):
         """向一个 24 位 MAP 地址写入一个 8 位寄存器值；超范围参数会报错。
@@ -151,18 +151,18 @@ class _CS43198Base:
         )) + data
         self.i2c.writeto(self.address, payload)
 
-    def reset(self, low_ms=3, settle_ms=3):
+    def reset(self, low_ms=5, settle_ms=5):
         """通过共用 RESET GPIO 产生硬件复位脉冲；会同时复位左右两颗 CS43198。
 
         复位释放后至少等待芯片完成上电和 ADR 地址锁存，再调用其他寄存器方法；
-        默认等待时间按规格书的 1.5 ms 上电示例留有余量；GPIO=1拉低芯片RESET，GPIO=0释放芯片RESET。
+        默认等待时间按规格书的 1.5 ms 上电示例留有余量；GPIO=0拉低芯片RESET，GPIO=1释放芯片RESET。
         """
         if self.reset_pin is None:
             raise RuntimeError("创建对象时未配置 reset_pin")
-        # RESET低有效且GPIO经低侧NMOS反相：GPIO高电平导通NMOS，将RESET拉低执行复位。
-        self.reset_pin.value(1)
+        # 使用正相RESET逻辑：GPIO低电平直接拉低CS43198的RESET以执行复位。
+        self.reset_pin.value(0)
         time.sleep_ms(low_ms)
-        self.reset_pin.value(0)  # GPIO低电平关闭NMOS，释放RESET并等待ADR地址锁存和控制口就绪。
+        self.reset_pin.value(1)  # GPIO高电平释放RESET并等待ADR地址锁存和控制口就绪。
         time.sleep_ms(settle_ms)
 
     def read_device_id(self):
