@@ -64,7 +64,13 @@ REG_INTERRUPT_STATUS_3 = 0x0F0002  # 中断状态 3：XSP/原生DSD状态（读�
 REG_INTERRUPT_STATUS_5 = 0x0F0004  # 中断状态 5（读清除）
 REG_INTERRUPT_MASK_1 = 0x0F0010    # 中断屏蔽 1
 REG_INTERRUPT_MASK_2 = 0x0F0011    # 中断屏蔽 2
+REG_INTERRUPT_MASK_3 = 0x0F0012    # 中断屏蔽 3：未使用的XSP接口保持屏蔽
 REG_INTERRUPT_MASK_5 = 0x0F0014    # 中断屏蔽 5
+
+# 播放故障位：只开放故障，静音模式、DoP状态、晶体/PLL就绪和PDN_DONE不触发重配置。
+PLAYBACK_DAC_FAULT_BITS = 0x80     # 状态1：DAC溢出
+PLAYBACK_PCM_FAULT_BITS = 0xF8     # 状态2：ASP溢出、LRCK错误、早到、晚到和无LRCK
+PLAYBACK_DSD_FAULT_BITS = 0xE4     # 状态5：DSD卡死、A/B无效和速率错误；静音模式不是故障
 # 规格书示例中的 Popguard 和模拟输出辅助寄存器地址。
 REG_POPGUARD_CONTROL = 0x010010   # Popguard 电源上电/下电控制
 REG_POPGUARD_TIMING = 0x080032    # Popguard 输出斜坡时序控制

@@ -80,7 +80,7 @@ class _CS43198Base:
         """创建一颗 DAC 的驱动对象；引脚仍为占位值，初始化不执行播放配置。
 
         i2c 可传入预先创建的 machine.I2C；否则按 bus_id、SCL、SDA 创建硬件总线。
-        RESET 两颗芯片共用，构造时将GPIO置高以释放CS43198的RESET，不会执行复位脉冲。
+        RESET 两颗芯片共用，构造时将GPIO置低保持复位，由reset()统一释放。
         """
         self.address = address
         self.side = side
@@ -93,7 +93,7 @@ class _CS43198Base:
             sda=Pin(sda_pin),
             freq=freq,
         )
-        # 使用正相RESET逻辑：GPIO低电平对应CS43198复位，构造时置高使RESET保持释放。
+        # 使用正相RESET逻辑：GPIO低电平对应CS43198复位，构造时保持复位，避免未配置即启动。
         self.reset_pin = Pin(reset_pin, Pin.OUT, value=0) if reset_pin is not None else None    #初始为0，拉低dac的reset
 
     def write_reg(self, address, value):
@@ -118,7 +118,7 @@ class _CS43198Base:
     def read_reg(self, address):
         """读取一个 24 位 MAP 地址的 8 位寄存器值；读取状态寄存器可能清除中断。
 
-        先发送 3 字节寄存器地址和 8 位控制字节，再以重复起始条件读取数据。
+        先发送 3 字节寄存器地址和 8 位控制字节并结束写事务，再启动读事务。
         对有读清除行为的寄存器，读取结果本身会改变芯片状态。
         """
         if not 0 <= address <= 0xFFFFFF:
@@ -129,7 +129,8 @@ class _CS43198Base:
             address & 0xFF,
             reg.I2C_CONTROL_BYTE,
         ))
-        self.i2c.writeto(self.address, pointer, stop=False)
+        # 按规格书图4-31发送地址后先产生STOP，再以START启动读取。
+        self.i2c.writeto(self.address, pointer)
         return self.i2c.readfrom(self.address, 1)[0]
 
     def write_regs(self, address, values):
@@ -230,7 +231,7 @@ class _CS43198Base:
         self.write_reg(reg.REG_ASP_FRAME_CONFIG, 0x0A)
         # I2S 时钟极性使用规格书示例值；主从位按调用方选择。
         self.write_reg(reg.REG_ASP_CLOCK_CONFIG, 0x0C | (0x10 if role == "master" else 0))
-        # 修正为只启用接收通道1：左右芯片分别从左/右时隙取流，避免两个接收通道覆盖同一时隙。
+        # 按规格书例5-8启用两个接收通道并选择相同时隙，分别提供单声道的A/B数据。
         phase = 0x08 if self.side == "right" else 0x00
         self.write_reg(reg.REG_ASP_CHANNEL_1_LOCATION, 0x00)
         self.write_reg(reg.REG_ASP_CHANNEL_2_LOCATION, 0x00)
@@ -238,9 +239,9 @@ class _CS43198Base:
         # 修正通道分辨率随word_length变化，避免16/24位输入仍被配置成32位通道。
         resolution = {8: 0, 16: 1, 24: 2, 32: 3}[word_length]
         self.write_reg(reg.REG_ASP_CHANNEL_1_SIZE_ENABLE, phase | 0x04 | resolution)
-        self.write_reg(reg.REG_ASP_CHANNEL_2_SIZE_ENABLE, resolution)  # 关闭接收通道2，保留合法的通道分辨率。
-        # 在PCM处理路径将A复制到B；不使用交换或反相位，避免引入额外的交换/反相校准要求。
-        self.write_reg(reg.REG_PCM_PATH_CONTROL_2, 0x01)
+        self.write_reg(reg.REG_ASP_CHANNEL_2_SIZE_ENABLE, phase | 0x04 | resolution)
+        # 按单声道示例保持PCM通道控制为默认值，避免额外的复制位改变数据路径。
+        self.write_reg(reg.REG_PCM_PATH_CONTROL_2, 0x00)
         self.write_reg(reg.REG_PCM_FILTER_OPTION, 0x02)
         self.write_reg(reg.REG_PCM_VOLUME_A, 0x00)
         self.write_reg(reg.REG_PCM_VOLUME_B, 0x00)
@@ -314,9 +315,8 @@ class _CS43198Base:
 
     def power_down_playback(self, timeout_ms=100):
         """关闭模拟输出并等待 PDN_DONE，供运行中切换音频接口前使用。"""
-        # 规格书要求先开放并清除PDN_DONE事件，关闭PDN_HP后才可关闭ASP或DSDIF。
-        mask = self.read_reg(reg.REG_INTERRUPT_MASK_1)
-        self.write_reg(reg.REG_INTERRUPT_MASK_1, mask & 0xFE)
+        # 先清除旧PDN_DONE事件，关闭PDN_HP并等待完成后才可关闭ASP或DSDIF。
+        # 轮询PDN_DONE无需开放INT引脚中断，避免完成事件导致主循环反复重新配置。
         self.read_reg(reg.REG_INTERRUPT_STATUS_1)
         power = self.read_reg(reg.REG_POWER_DOWN)
         if power & 0x10:
@@ -359,6 +359,39 @@ class _CS43198Base:
             self.write_reg(reg.REG_POPGUARD_TIMING, 0x00)
             self.write_reg(reg.REG_POPGUARD_CONTROL, 0x00)
 
+    def configure_playback_interrupts(self, mode=None):
+        """mode为pcm/dsd时开放当前路径故障；None屏蔽播放相关中断以安全重配置。"""
+        # 先验证参数，避免错误参数部分改变屏蔽状态；MASK=1屏蔽，MASK=0开放。
+        if mode not in (None, "pcm", "dsd"):
+            raise ValueError("中断模式必须为None、pcm或dsd")
+        self.write_reg(reg.REG_INTERRUPT_MASK_1,
+                       0xFF if mode is None else 0xFF & ~reg.PLAYBACK_DAC_FAULT_BITS)
+        # MASK2/3的低三位为保留位，保持复位值0；未使用的接口不开放中断。
+        self.write_reg(reg.REG_INTERRUPT_MASK_2,
+                       0x00 if mode == "pcm" else 0xF8)
+        self.write_reg(reg.REG_INTERRUPT_MASK_3, 0xF8)
+        self.write_reg(reg.REG_INTERRUPT_MASK_5,
+                       0xFF & ~reg.PLAYBACK_DSD_FAULT_BITS if mode == "dsd" else 0xFF)
+
+    def playback_fault_present(self, mode):
+        """读取当前路径的播放故障；调用者须先清除启动粘滞位，再检查持续故障。"""
+        if mode not in ("pcm", "dsd"):
+            raise ValueError("故障检查模式必须为pcm或dsd")
+        # 左右片分别读取，不以共享INT电平推断故障属于哪颗芯片。
+        status = self.read_reg(reg.REG_INTERRUPT_STATUS_1)
+        address = reg.REG_INTERRUPT_STATUS_2 if mode == "pcm" else reg.REG_INTERRUPT_STATUS_5
+        path_status = self.read_reg(address)
+        path_mask = reg.PLAYBACK_PCM_FAULT_BITS if mode == "pcm" else reg.PLAYBACK_DSD_FAULT_BITS
+        return bool(status & reg.PLAYBACK_DAC_FAULT_BITS or path_status & path_mask)
+
+    def clear_interrupt_status(self):
+        """读取并返回四组已使用的中断状态，清除启动或切换留下的粘滞事件。"""
+        # 规格书4.11要求模块启用后、正常运行前读取状态；屏蔽INT不会阻止状态位置位。
+        # 不捕获I2C异常，让上层的静音保护中止启动；读取不代表持续故障已经消失。
+        return tuple(self.read_reg(address) for address in (
+            reg.REG_INTERRUPT_STATUS_1, reg.REG_INTERRUPT_STATUS_2,
+            reg.REG_INTERRUPT_STATUS_3, reg.REG_INTERRUPT_STATUS_5))
+
     def dac_debug(self):
         """读取本 DAC 的中断状态并执行一次安全的状态清理，返回错误字符串列表。
 
@@ -380,38 +413,42 @@ class _CS43198Base:
 
         # 状态1中的耳机插拔位对应悬空电路引脚，按要求不参与判断。
         status_1_map = (
-            (0x01, "dac_overflow"),
-            (0x08, "xtal_ready"),
-            (0x10, "xtal_error"),
-            (0x20, "pll_ready"),
-            (0x40, "pll_error"),
-            (0x80, "pdn_done"),
+            # 修正规格书7.6.1的位序：溢出在bit7，PDN_DONE在bit0。
+            (0x80, "dac_overflow"),
+            (0x10, "xtal_ready"),
+            (0x08, "xtal_error"),
+            (0x04, "pll_ready"),
+            (0x02, "pll_error"),
+            (0x01, "pdn_done"),
         )
         # 状态2为PCM/ASP接口状态；状态3为原生DSD/XSP接口状态。
         status_2_map = (
-            (0x01, "asp_overflow"),
-            (0x02, "asp_error"),
-            (0x04, "asp_late"),
-            (0x08, "asp_early"),
-            (0x10, "asp_no_lrck"),
+            # 修正ASP状态位，bit2:0为保留位。
+            (0x80, "asp_overflow"),
+            (0x40, "asp_error"),
+            (0x20, "asp_late"),
+            (0x10, "asp_early"),
+            (0x08, "asp_no_lrck"),
         )
         status_3_map = (
-            (0x01, "xsp_overflow"),
-            (0x02, "xsp_error"),
-            (0x04, "xsp_late"),
-            (0x08, "xsp_early"),
-            (0x10, "xsp_no_lrck"),
+            # 修正XSP状态位，与ASP状态寄存器使用相同位序。
+            (0x80, "xsp_overflow"),
+            (0x40, "xsp_error"),
+            (0x20, "xsp_late"),
+            (0x10, "xsp_early"),
+            (0x08, "xsp_no_lrck"),
         )
         # 状态5为DSD/DoP检测状态；这些状态均保留给上层判断是否需要重配。
         status_5_map = (
-            (0x01, "dsd_stuck"),
-            (0x02, "dsd_channel_a_invalid"),
-            (0x04, "dsd_channel_b_invalid"),
-            (0x08, "dsd_channel_a_silence"),
-            (0x10, "dsd_channel_b_silence"),
-            (0x20, "dsd_rate_error"),
-            (0x40, "dop_marker_detected"),
-            (0x80, "dop_engine_on"),
+            # 修正DSD/DoP状态位序，与寄存器bit7至bit0定义一致。
+            (0x80, "dsd_stuck"),
+            (0x40, "dsd_channel_a_invalid"),
+            (0x20, "dsd_channel_b_invalid"),
+            (0x10, "dsd_channel_a_silence"),
+            (0x08, "dsd_channel_b_silence"),
+            (0x04, "dsd_rate_error"),
+            (0x02, "dop_marker_detected"),
+            (0x01, "dop_engine_on"),
         )
         # 只接受当前声道对应的错误元组中的名称，保证后续判断使用统一字符串。
         error_names = Dac_errors_l if self.side == "left" else Dac_errors_r
