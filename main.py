@@ -17,10 +17,8 @@ BALCH_PIN = 28
 BALCH_OUT_PIN = 18
 SECH_OUT_PIN = 19
 HW_MUTE_PIN = 11
-DETBAL_L_PIN = 12
-DETBAL_R_PIN = 13
-DETSE_L_PIN = 16
-DETSE_R_PIN = 17
+DETBAL_PIN = 13
+DETSE_PIN = 16
 INT_PIN = 0
 # 按当前硬件约定，DSD模式使用外部MCLK直通，标称频率固定为22.5792 MHz。
 DSD_MCLK_HZ = 22_579_200
@@ -36,10 +34,8 @@ balch_out_pin = Pin(BALCH_OUT_PIN, Pin.OUT, value=0)
 sech_out_pin = Pin(SECH_OUT_PIN, Pin.OUT, value=0)
 hw_mute_pin = Pin(HW_MUTE_PIN, Pin.OUT, value=1)    # 与hw_mute一致：1为静音，启动创建GPIO时立即建立硬件静音。
 mute_in_pin = Pin(MUTE_PIN, Pin.IN)     # 修正Combo384静音输入脚的Pin构造参数，避免启动时报AttributeError。
-detbal_l_pin = Pin(DETBAL_L_PIN, Pin.IN)
-detbal_r_pin = Pin(DETBAL_R_PIN, Pin.IN)
-detse_l_pin = Pin(DETSE_L_PIN, Pin.IN)
-detse_r_pin = Pin(DETSE_R_PIN, Pin.IN)
+detbal_pin = Pin(DETBAL_PIN, Pin.IN)
+detse_pin = Pin(DETSE_PIN, Pin.IN)
 int_pin = Pin(INT_PIN, Pin.IN)
 
 Ctrl = combo384.Combo384()
@@ -50,7 +46,7 @@ Pin_numbers = (combo384.FN_PINS[0], combo384.FN_PINS[1], combo384.FN_PINS[2], co
         cs43198.I2C1_SCL_PIN, cs43198.I2C1_SDA_PIN, DSDON_PIN, PLUG_PIN, PCMCH_PIN, BALCH_PIN,
         BALCH_OUT_PIN, SECH_OUT_PIN, HW_MUTE_PIN
         )
-Gpio_in = (mute_in_pin, pcm_pin, bal_pin, dsdon_pin, plug_pin, detbal_l_pin, detbal_r_pin, detse_l_pin, detse_r_pin,
+Gpio_in = (mute_in_pin, pcm_pin, bal_pin, dsdon_pin, plug_pin, detbal_pin, detse_pin,
            Ctrl.fn_pin[0], Ctrl.fn_pin[1], Ctrl.fn_pin[2], Ctrl.fn_pin[3])  # 修正为访问Combo384实例的输入引脚列表。
 Pending = False
 Dac_Interrupt_Pending = False
@@ -182,11 +178,11 @@ def _detect():
         return
 
     pcmch, balance, dsdon, plug = state[1:5]
-    bal_l, bal_r, se_l, se_r = state[5:9]
+    detbal, detse = state[5:7]  # 检测脚合并为平衡、单端各一路，读取同一份已消抖快照。
     format_valid = (pcmch ^ dsdon) == 1
     is_dsd = bool(dsdon)
-    output_ready = bool(plug and ((balance and bal_l and bal_r) or
-                                  (not balance and se_l and se_r)))
+    # 新电路检测逻辑反相：平衡模式仅检查detbal为0，单端模式仅检查detse为0，才允许解除静音。
+    output_ready = bool(plug and ((balance and detbal == 0) or (not balance and detse == 0)))
 
     # 先关闭模拟输出并等待PDN_DONE，再关闭旧音频接口；任何失败都保持硬件静音。
     for dac in dacs:
@@ -200,14 +196,14 @@ def _detect():
         return
 
     # 新版图表PCM编码为0至8，DSD编码为9至12；先校验原始编码，禁止格式之间混用。
-    rate_code = sum(value << bit for bit, value in enumerate(state[9:13]))
+    rate_code = sum(value << bit for bit, value in enumerate(state[7:11]))  # 检测脚减少两路，F0-F3快照前移两位。
     # 新版规格书的DSD编码为9至12；用驱动Dsd_rate()解码，按CS43198处理器模式接纳64/128/256，拒绝板卡可报告但DAC不支持的512。
     if not is_dsd and rate_code > 8:
         return
     dsd_rate = None
     if is_dsd:
         try:
-            dsd_rate = Ctrl.Dsd_rate(state[9:13])  # 使用已稳定的F0-F3快照，避免重复读取引脚。
+            dsd_rate = Ctrl.Dsd_rate(state[7:11])  # 使用合并检测脚后前移的F0-F3稳定快照。
         except ValueError:
             return
         if dsd_rate not in cs43198_reg.DSD_RATE_CODES:  # 与驱动的DSD_SPEED有效编码表保持一致。
@@ -223,8 +219,8 @@ def _detect():
     # 修改为从同一份已消抖快照计算PCM编码、采样率和MCLK，避免采样期间的引脚变化混用新旧模式。
     # PCM采样率只在PCM路径使用；DSD倍速由Dsd_rate()从F0-F3专用编码得出。
     # DSD不再伪造384kHz的PCM采样率；USB PCM统一调用Combo384驱动解码同一份快照。
-    sample_rate = None if is_dsd else Ctrl.rate[Ctrl.Fn(state[9:13])]
-    mclk_hz = DSD_MCLK_HZ if is_dsd else Ctrl.Mclk_Hz_pcm(state[9:13])
+    sample_rate = None if is_dsd else Ctrl.rate[Ctrl.Fn(state[7:11])]  # PCM采样率同步使用前移后的F0-F3快照。
+    mclk_hz = DSD_MCLK_HZ if is_dsd else Ctrl.Mclk_Hz_pcm(state[7:11])  # PCM时钟同步使用前移后的F0-F3快照。
     for dac in dacs:
         if is_dsd:
             dac.configure_dsd_mono(dsd_rate)
