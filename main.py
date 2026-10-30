@@ -20,6 +20,7 @@ HW_MUTE_PIN = 11
 DETBAL_PIN = 13
 DETSE_PIN = 16
 INT_PIN = 0
+DSDCH_OUT_PIN = 10
 # 按当前硬件约定，DSD模式使用外部MCLK直通，标称频率固定为22.5792 MHz。
 DSD_MCLK_HZ = 22_579_200
 
@@ -33,6 +34,7 @@ plug_pin = Pin(PLUG_PIN, Pin.IN)
 balch_out_pin = Pin(BALCH_OUT_PIN, Pin.OUT, value=0)
 sech_out_pin = Pin(SECH_OUT_PIN, Pin.OUT, value=0)
 hw_mute_pin = Pin(HW_MUTE_PIN, Pin.OUT, value=1)    # 与hw_mute一致：1为静音，启动创建GPIO时立即建立硬件静音。
+dsdch_out_pin = Pin(DSDCH_OUT_PIN, Pin.OUT, value=0)
 mute_in_pin = Pin(MUTE_PIN, Pin.IN)     # 修正Combo384静音输入脚的Pin构造参数，避免启动时报AttributeError。
 detbal_pin = Pin(DETBAL_PIN, Pin.IN)
 detse_pin = Pin(DETSE_PIN, Pin.IN)
@@ -44,7 +46,7 @@ Right = cs43198.CS43198_R()
 Pin_numbers = (combo384.FN_PINS[0], combo384.FN_PINS[1], combo384.FN_PINS[2], combo384.FN_PINS[3],
         MUTE_PIN, RLED_PIN, GLED_PIN, cs43198.RESET_PIN, cs43198.I2C0_SCL_PIN, cs43198.I2C0_SDA_PIN,
         cs43198.I2C1_SCL_PIN, cs43198.I2C1_SDA_PIN, DSDON_PIN, PLUG_PIN, PCMCH_PIN, BALCH_PIN,
-        BALCH_OUT_PIN, SECH_OUT_PIN, HW_MUTE_PIN
+        BALCH_OUT_PIN, SECH_OUT_PIN, HW_MUTE_PIN, DSDCH_OUT_PIN
         )
 Gpio_in = (mute_in_pin, pcm_pin, bal_pin, dsdon_pin, plug_pin, detbal_pin, detse_pin,
            Ctrl.fn_pin[0], Ctrl.fn_pin[1], Ctrl.fn_pin[2], Ctrl.fn_pin[3])  # 修正为访问Combo384实例的输入引脚列表。
@@ -109,6 +111,8 @@ def _initialization():
     # 复位前无法依赖数字静音，因此先建立硬件静音，再复位两片共用RESET的DAC。
     global L_ID, R_ID
     hw_mute(True)
+    # 初始化期间保持外部通道选择在PCM侧；完成输入检测后由_detect按实际模式更新。
+    dsdch_out_pin.value(0)
     Left.reset()
     L_ID = None
     R_ID = None
@@ -181,6 +185,8 @@ def _detect():
     detbal, detse = state[5:7]  # 检测脚合并为平衡、单端各一路，读取同一份已消抖快照。
     format_valid = (pcmch ^ dsdon) == 1
     is_dsd = bool(dsdon)
+    # 外部DSD/PCM通道选择与本次稳定检测到的音频模式同步：DSD为1，PCM为0。
+    dsdch_out_pin.value(1 if is_dsd else 0)
     # 新电路检测逻辑反相：平衡模式仅检查detbal为0，单端模式仅检查detse为0，才允许解除静音。
     output_ready = bool(plug and ((balance and detbal == 0) or (not balance and detse == 0)))
 
